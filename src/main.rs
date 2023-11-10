@@ -1,8 +1,11 @@
 // Uncomment this block to pass the first stage
 use std::{
-    io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener, sync::Arc,
 };
+
+use router::{Request, Response};
+
+mod router;
 
 fn main() -> Result<(), std::io::Error> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -12,13 +15,18 @@ fn main() -> Result<(), std::io::Error> {
     //
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
+    let mut router = router::Router::new();
+    router.get("/", home_page);
+    router.get("/echo/:str", echo);
+    router.get("/user-agent", user_agent);
+
+    let router = Arc::new(router);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                std::thread::spawn(|| {
-                    println!("accepted new connection");
-                    handle_connection(stream).expect("failed to handle");
-                    println!("connection closed");
+                let router = router.clone();
+                std::thread::spawn(move || {
+                    router.execute(stream)
                 });
             }
             Err(e) => {
@@ -31,43 +39,28 @@ fn main() -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) -> Result<(), std::io::Error> {
-    let buf_reader = BufReader::new(&mut stream);
-    let request = buf_reader
-        .lines()
-        .map(|result| result.unwrap())
-        .take_while(|line| !line.is_empty())
-        .collect::<Vec<_>>();
 
-    let first_line = request[0].split_whitespace().collect::<Vec<_>>();
-    let method = first_line[0];
-    let path = first_line[1];
-
-    router(method, path, &mut stream)?;
-    println!("request handled");
-
-    Ok(())
-}
-
-fn router(method: &str, path: &str, stream: &mut TcpStream) -> Result<(), std::io::Error> {
-    println!("method: {}", method);
-    println!("path: {}", path);
-
-    if method == "GET" && path == "/" {
-        Ok(stream.write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())?)
-    } else if method == "GET" && path.starts_with("/echo/") {
-        Ok(echo(&path[6..], stream)?)
-    } else {
-        Ok(stream.write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())?)
+fn home_page(_request: Request) -> Response{
+    Response {
+        status_code: 200,
+        body: "".into(),
+        content_type: "text/plain".into(),
     }
 }
 
-fn echo(str: &str, stream: &mut TcpStream) -> Result<(), std::io::Error> {
-    let response = build_text_response(str);
-    stream.write_all(response.as_bytes())?;
-    Ok(())
+
+fn echo(request: Request) -> Response {
+    Response {
+        status_code: 200,
+        body: request.params.get("str").unwrap().to_string(),
+        content_type: "text/plain".into(),
+    }
 }
 
-fn build_text_response(text: &str) -> String {
-    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", text.len(), text)
+fn user_agent(request: Request) -> Response {
+    Response {
+        status_code: 200,
+        body: request.headers.get("user-agent").unwrap().to_string(),
+        content_type: "text/plain".into(),
+    }
 }
