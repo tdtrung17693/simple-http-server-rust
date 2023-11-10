@@ -1,6 +1,6 @@
 // Uncomment this block to pass the first stage
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
 };
 
@@ -32,16 +32,30 @@ fn main() -> Result<(), std::io::Error> {
 }
 
 fn handle_connection(mut stream: TcpStream) -> Result<(), std::io::Error> {
-    let mut data: Vec<u8> = vec![];
-    let mut buf_reader = BufReader::new(&mut stream);
+    let buf_reader = BufReader::new(&mut stream);
     let request = buf_reader
         .lines()
         .map(|result| result.unwrap())
         .take_while(|line| !line.is_empty())
         .collect::<Vec<_>>();
 
-    stream.write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())?;
-    println!("response sent");
+    let first_line = request[0].split_whitespace().collect::<Vec<_>>();
+    let method = first_line[0];
+    let path = first_line[1];
+
+    router(method, path, &mut stream)?;
+    println!("request handled");
 
     Ok(())
+}
+
+fn router(method: &str, path: &str, stream: &mut TcpStream) -> Result<(), std::io::Error> {
+    println!("method: {}", method);
+    println!("path: {}", path);
+
+    if method == "GET" && path == "/" {
+        Ok(stream.write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())?)
+    } else {
+        Ok(stream.write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())?)
+    }
 }
