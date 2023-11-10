@@ -55,7 +55,19 @@ fn router(method: &str, path: &str, stream: &mut TcpStream) -> Result<(), std::i
 
     if method == "GET" && path == "/" {
         Ok(stream.write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())?)
+    } else if method == "GET" && path.starts_with("/echo/") {
+        Ok(echo(&path[6..], stream)?)
     } else {
         Ok(stream.write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())?)
     }
+}
+
+fn echo(str: &str, stream: &mut TcpStream) -> Result<(), std::io::Error> {
+    let response = build_text_response(str);
+    stream.write_all(response.as_bytes())?;
+    Ok(())
+}
+
+fn build_text_response(text: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", text.len(), text)
 }
