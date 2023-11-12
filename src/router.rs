@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
 };
 
@@ -15,6 +15,7 @@ pub struct Request {
     pub method: Method,
     pub params: HashMap<String, String>,
     pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -35,12 +36,29 @@ impl Method {
 
 impl From<&TcpStream> for Request {
     fn from(mut stream: &TcpStream) -> Self {
-        let buf_reader = BufReader::new(&mut stream);
-        let request = buf_reader
-            .lines()
-            .map(|result| result.unwrap())
-            .take_while(|line| !line.is_empty())
-            .collect::<Vec<_>>();
+        let mut buf_reader = BufReader::new(&mut stream);
+
+        let mut line = Vec::new();
+        let mut request: Vec<String> = Vec::new();
+        loop {
+            match buf_reader.read_until(b'\n', &mut line) {
+                Ok(_) => {
+                    if line == b"\r\n" {
+                        break;
+                    }
+                    request.push(
+                        String::from_utf8_lossy(&line)
+                            .strip_suffix("\r\n")
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+            line.clear();
+        }
 
         let first_line = request[0].split_whitespace().collect::<Vec<_>>();
         let method = first_line[0];
@@ -58,11 +76,18 @@ impl From<&TcpStream> for Request {
             })
             .collect::<HashMap<String, String>>();
 
+        let content_length = headers
+            .get("content-length")
+            .map_or(0, |v| v.parse().unwrap());
+        let mut body = vec![0; content_length];
+        buf_reader.read_exact(&mut body).unwrap();
+
         Self {
             path: path.into(),
             method: Method::from_str(method).unwrap(),
             params: HashMap::new(),
             headers,
+            body,
         }
     }
 }
@@ -145,6 +170,18 @@ impl Router {
     pub fn get(&mut self, path: &str, handler: fn(Request) -> Response) {
         let route_bag =
             if let std::collections::hash_map::Entry::Vacant(e) = self.routes.entry(Method::Get) {
+                e.insert(Vec::new())
+            } else {
+                self.routes.get_mut(&Method::Get).unwrap()
+            };
+
+        let route = Route::new(path, handler);
+        route_bag.push(route);
+    }
+
+    pub fn post(&mut self, path: &str, handler: fn(Request) -> Response) {
+        let route_bag =
+            if let std::collections::hash_map::Entry::Vacant(e) = self.routes.entry(Method::Post) {
                 e.insert(Vec::new())
             } else {
                 self.routes.get_mut(&Method::Get).unwrap()

@@ -32,7 +32,8 @@ fn main() -> Result<(), std::io::Error> {
     router.get("/", home_page);
     router.get("/echo/:str", echo);
     router.get("/user-agent", user_agent);
-    router.get("/files/:file", file_service);
+    router.get("/files/:file", file_reading);
+    router.post("/files/:file", file_uploading);
 
     let router = Arc::new(router);
     for stream in listener.incoming() {
@@ -75,13 +76,14 @@ fn user_agent(request: Request) -> Response {
     }
 }
 
-fn file_service(request: Request) -> Response {
+fn file_reading(request: Request) -> Response {
     let file_name = request.params.get("file").unwrap();
-    let file_content = std::fs::read(format!(
+    let file_path = format!(
         "{}/{}",
         APP_CONTEXT.get().unwrap().file_directory,
         file_name
-    ));
+    );
+    let file_content = std::fs::read(file_path);
     if file_content.is_err() {
         return Response {
             status_code: 404,
@@ -95,5 +97,39 @@ fn file_service(request: Request) -> Response {
         status_code: 200,
         body: file_content,
         content_type: "application/octet-stream".into(),
+    }
+}
+
+fn file_uploading(request: Request) -> Response {
+    let file_name = request.params.get("file").unwrap();
+    let file_content = request.body;
+    if file_content.is_empty() {
+        return Response {
+            status_code: 400,
+            body: "Bad Request".into(),
+            content_type: "text/plain".into(),
+        }
+    }
+
+    let file_path = format!(
+        "{}/{}",
+        APP_CONTEXT.get().unwrap().file_directory,
+        file_name
+    );
+
+    if let Err(err) = std::fs::write(file_path, file_content) {
+        println!("error: {}", err);
+        return Response {
+            status_code: 500,
+            body: "Internal Server Error".into(),
+            content_type: "text/plain".into(),
+        }
+    }
+
+
+    Response {
+        status_code: 201,
+        body: "File Created".into(),
+        content_type: "text/plain".into(),
     }
 }
