@@ -5,6 +5,7 @@ use router::{Request, Response};
 use tokio::sync::OnceCell;
 
 mod router;
+mod router_refact;
 
 struct AppContext {
     file_directory: String,
