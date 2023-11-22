@@ -1,11 +1,10 @@
 // Uncomment this block to pass the first stage
 use std::{env, net::TcpListener, sync::Arc};
 
-use router::{Request, Response};
+use router::{Request, Response, Router};
 use tokio::sync::OnceCell;
 
 mod router;
-mod router_refact;
 
 struct AppContext {
     file_directory: String,
@@ -19,10 +18,8 @@ fn main() -> Result<(), std::io::Error> {
 
     // Uncomment this block to pass the first stage
     //
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-
     let args = env::args().collect::<Vec<String>>();
-    let file_directory: &str = args.get(2).and_then(|arg| Some(arg.as_str())).unwrap_or("");
+    let file_directory: &str = args.get(2).map(|arg| arg.as_str()).unwrap_or("");
     let _ = APP_CONTEXT
         .set(AppContext {
             file_directory: file_directory.to_string(),
@@ -36,21 +33,40 @@ fn main() -> Result<(), std::io::Error> {
     router.get("/files/:file", file_reading);
     router.post("/files/:file", file_uploading);
 
-    let router = Arc::new(router);
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let router = router.clone();
-                std::thread::spawn(move || router.execute(stream));
-            }
-            Err(e) => {
-                println!("error: {}", e);
-                return Err(e);
-            }
+    let app = App::new(router, 4221);
+    app.start()
+}
+
+struct App {
+    router: Arc<Router>,
+    port: u16
+}
+
+impl App {
+    pub fn new(router: Router, port: u16) -> Self {
+        Self {
+            router: Arc::new(router),
+            port
         }
     }
 
-    Ok(())
+    pub fn start(self) -> Result<(), std::io::Error> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", self.port)).unwrap();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let router = self.router.clone();
+                    std::thread::spawn(move || router.execute(stream));
+                }
+                Err(e) => {
+                    println!("error: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn home_page(_request: Request) -> Response {
@@ -109,7 +125,7 @@ fn file_uploading(request: Request) -> Response {
             status_code: 400,
             body: "Bad Request".into(),
             content_type: "text/plain".into(),
-        }
+        };
     }
 
     let file_path = format!(
@@ -124,9 +140,8 @@ fn file_uploading(request: Request) -> Response {
             status_code: 500,
             body: "Internal Server Error".into(),
             content_type: "text/plain".into(),
-        }
+        };
     }
-
 
     Response {
         status_code: 201,
