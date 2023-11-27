@@ -2,56 +2,52 @@
 use std::{env, net::TcpListener, sync::Arc};
 
 use router::{Request, Response, Router};
-use tokio::sync::OnceCell;
 
+mod handler;
+mod impl_handler;
 mod router;
 
 struct AppContext {
     file_directory: String,
 }
 
-static APP_CONTEXT: OnceCell<AppContext> = OnceCell::const_new();
-
 fn main() -> Result<(), std::io::Error> {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    // println!("Logs from your program will appear here!");
-
-    // Uncomment this block to pass the first stage
-    //
     let args = env::args().collect::<Vec<String>>();
-    let file_directory: &str = args.get(2).map(|arg| arg.as_str()).unwrap_or("");
-    let _ = APP_CONTEXT
-        .set(AppContext {
-            file_directory: file_directory.to_string(),
-        })
-        .map_err(|_| ());
+    let current_directory = env::current_dir().map(|dir| dir.to_string_lossy().to_string()).unwrap_or("./".into());
+    let file_directory: String = args.get(2).map(|arg| arg.to_string()).unwrap_or(format!("{current_directory}/files"));
+    let state = Arc::new(AppContext {
+        file_directory,
+    });
 
-    let mut router = router::Router::new();
-    router.get("/", home_page);
-    router.get("/echo/:str", echo);
-    router.get("/user-agent", user_agent);
-    router.get("/files/:file", file_reading);
-    router.post("/files/:file", file_uploading);
+    println!("File server directory: {}", state.file_directory);
+    let router = router::Router::new()
+        .get("/files/:file", file_reading)
+        .post("/files/:file", file_uploading)
+        .with_state(state)
+        .get("/", home_page)
+        .get("/echo/:str", echo)
+        .get("/user-agent", user_agent);
 
     let app = App::new(router, 4221);
     app.start()
 }
 
 struct App {
-    router: Arc<Router>,
-    port: u16
+    router: Arc<Router<()>>,
+    port: u16,
 }
 
 impl App {
-    pub fn new(router: Router, port: u16) -> Self {
+    pub fn new(router: Router<()>, port: u16) -> Self {
         Self {
             router: Arc::new(router),
-            port
+            port,
         }
     }
 
     pub fn start(self) -> Result<(), std::io::Error> {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", self.port)).unwrap();
+        println!("Listening on port {}...", self.port);
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -93,11 +89,11 @@ fn user_agent(request: Request) -> Response {
     }
 }
 
-fn file_reading(request: Request) -> Response {
+fn file_reading(request: Request, state: Arc<AppContext>) -> Response {
     let file_name = request.params.get("file").unwrap();
     let file_path = format!(
         "{}/{}",
-        APP_CONTEXT.get().unwrap().file_directory,
+        state.file_directory,
         file_name
     );
     let file_content = std::fs::read(file_path);
@@ -117,7 +113,7 @@ fn file_reading(request: Request) -> Response {
     }
 }
 
-fn file_uploading(request: Request) -> Response {
+fn file_uploading(request: Request, state: Arc<AppContext>) -> Response {
     let file_name = request.params.get("file").unwrap();
     let file_content = request.body;
     if file_content.is_empty() {
@@ -130,7 +126,7 @@ fn file_uploading(request: Request) -> Response {
 
     let file_path = format!(
         "{}/{}",
-        APP_CONTEXT.get().unwrap().file_directory,
+        state.file_directory,
         file_name
     );
 

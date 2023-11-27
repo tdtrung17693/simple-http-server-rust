@@ -4,6 +4,8 @@ use std::{
     net::TcpStream,
 };
 
+use crate::handler::{BoxedHandler, StatefulHandler, StatelessHandlerImpl};
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
@@ -124,17 +126,21 @@ impl From<Response> for Vec<u8> {
     }
 }
 
-#[derive(Debug)]
-pub struct Route {
+enum RouteHandler<S> {
+    Stateful(BoxedHandler<S>),
+    Stateless(StatelessHandlerImpl),
+}
+
+pub struct Route<S> {
     matcher: regex::Regex,
-    handler: fn(Request) -> Response,
+    handler: RouteHandler<S>,
     params: Vec<String>,
 }
 
-pub type RouteBag = Vec<Route>;
+pub type RouteBag<S> = Vec<Route<S>>;
 
-pub struct Router {
-    routes: HashMap<Method, RouteBag>,
+pub struct Router<S> {
+    routes: HashMap<Method, RouteBag<S>>,
 }
 
 impl From<std::io::Error> for Error {
@@ -143,8 +149,15 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl Route {
-    fn new(path: &str, handler: fn(Request) -> Response) -> Self {
+impl<S> Route<S>
+where
+    S: Send + Sync + Clone + 'static,
+{
+    fn new<H, T>(path: &str, handler: H) -> Self
+    where
+        H: StatefulHandler<T, S> + Send + Sync + Clone + 'static,
+        T: Send + Clone + 'static,
+    {
         let params_regex = regex::Regex::new(r":([a-zA-Z0-9]+)").unwrap();
         let params = params_regex
             .find_iter(path)
@@ -156,18 +169,38 @@ impl Route {
         Self {
             matcher: regex::Regex::new(&format!("^{}$", segments)).unwrap(),
             params,
-            handler,
+            handler: RouteHandler::Stateful(BoxedHandler::from_handler(handler)),
+        }
+    }
+
+    fn with_state<S2>(self, state: S) -> Route<S2> {
+        Route {
+            matcher: self.matcher,
+            params: self.params,
+            handler: match self.handler {
+                RouteHandler::Stateful(handler) => {
+                    RouteHandler::Stateless(handler.into_stateless_handler(state))
+                }
+                RouteHandler::Stateless(handler) => RouteHandler::Stateless(handler),
+            },
         }
     }
 }
 
-impl Router {
+impl<S> Router<S>
+where
+    S: Send + Sync + Clone + 'static,
+{
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
         }
     }
-    pub fn get(&mut self, path: &str, handler: fn(Request) -> Response) {
+    pub fn get<H, T>(mut self, path: &str, handler: H) -> Self
+    where
+        H: StatefulHandler<T, S> + Send + Sync + Clone + 'static,
+        T: Send + Clone + 'static,
+    {
         let route_bag =
             if let std::collections::hash_map::Entry::Vacant(e) = self.routes.entry(Method::Get) {
                 e.insert(Vec::new())
@@ -177,9 +210,14 @@ impl Router {
 
         let route = Route::new(path, handler);
         route_bag.push(route);
+        self
     }
 
-    pub fn post(&mut self, path: &str, handler: fn(Request) -> Response) {
+    pub fn post<H, T>(mut self, path: &str, handler: H) -> Self
+    where
+        H: StatefulHandler<T, S> + Send + Sync + Clone + 'static,
+        T: Send + Clone + 'static,
+    {
         let route_bag =
             if let std::collections::hash_map::Entry::Vacant(e) = self.routes.entry(Method::Post) {
                 e.insert(Vec::new())
@@ -189,33 +227,10 @@ impl Router {
 
         let route = Route::new(path, handler);
         route_bag.push(route);
+        self
     }
 
-    pub fn execute(&self, mut connection: TcpStream) -> Result<(), Error> {
-        let mut request = Request::from(&connection);
-        let route = self.get_route(&mut request);
-
-        let response = route
-            .map(|route| {
-                let handler = route.handler;
-
-                handler(request)
-            })
-            .or_else(|| {
-                Some(Response {
-                    status_code: 404,
-                    body: "Not Found".into(),
-                    content_type: "text/plain".into(),
-                })
-            })
-            .unwrap();
-
-        let response: Vec<u8> = response.into();
-        connection.write_all(&response[..])?;
-        Ok(())
-    }
-
-    fn get_route(&self, request: &mut Request) -> Option<&Route> {
+    fn get_route(&self, request: &mut Request) -> Option<&Route<S>> {
         let route_bag = self.routes.get(&request.method)?;
         let path = &request.path;
         route_bag.iter().find(|route| {
@@ -232,5 +247,51 @@ impl Router {
             }
             true
         })
+    }
+
+    pub fn with_state<S2>(self, state: S) -> Router<S2> {
+        Router {
+            routes: self
+                .routes
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().map(|r| r.with_state(state.clone())).collect()))
+                .collect(),
+        }
+    }
+}
+
+impl Router<()> {
+    pub fn execute(&self, mut connection: TcpStream) -> Result<(), Error> {
+        let mut request = Request::from(&connection);
+        let route = self.get_route(&mut request);
+
+        let response = route
+            .map(|route| {
+                let handler = &route.handler;
+
+                match handler {
+                    RouteHandler::Stateful(handler) => {
+                        let handler = handler.clone();
+                        let stateless_handler = handler.into_stateless_handler(());
+                        stateless_handler.call(request)
+                    }
+                    RouteHandler::Stateless(handler) => {
+                        let handler = handler.clone();
+                        handler.call(request)
+                    }
+                }
+            })
+            .or_else(|| {
+                Some(Response {
+                    status_code: 404,
+                    body: "Not Found".into(),
+                    content_type: "text/plain".into(),
+                })
+            })
+            .unwrap();
+
+        let response: Vec<u8> = response.into();
+        connection.write_all(&response[..])?;
+        Ok(())
     }
 }
